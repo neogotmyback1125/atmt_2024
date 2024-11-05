@@ -12,6 +12,8 @@ from seq2seq import models, utils
 from seq2seq.data.dictionary import Dictionary
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
 from seq2seq.models import ARCH_MODEL_REGISTRY, ARCH_CONFIG_REGISTRY
+from subword_nmt.apply_bpe import BPE
+import random
 
 def get_args():
     """ Defines training-specific hyper-parameters. """
@@ -19,7 +21,7 @@ def get_args():
     parser.add_argument('--cuda', action='store_true', help='Use a GPU')
 
     # Add data arguments
-    parser.add_argument('--data', default='indomain/preprocessed_data/', help='path to data directory')
+    parser.add_argument('--data', default='data/en-fr/preprocessed', help='path to data directory')
     parser.add_argument('--source-lang', default='fr', help='source language')
     parser.add_argument('--target-lang', default='en', help='target language')
     parser.add_argument('--max-tokens', default=None, type=int, help='maximum number of tokens in a batch')
@@ -37,7 +39,7 @@ def get_args():
                         help='number of epochs without improvement on validation set before early stopping')
 
     # Add checkpoint arguments
-    parser.add_argument('--log-file', default=None, help='path to save logs')
+    parser.add_argument('--log-file', default='training_log.txt', help='path to save logs')
     parser.add_argument('--save-dir', default='checkpoints_asg4', help='path to save checkpoints')
     parser.add_argument('--restore-file', default='checkpoint_last.pt', help='filename to load checkpoint')
     parser.add_argument('--save-interval', type=int, default=1, help='save a checkpoint every N epochs')
@@ -52,6 +54,25 @@ def get_args():
     ARCH_CONFIG_REGISTRY[args.arch](args)
     return args
 
+def apply_bpe_dropout(data_file, bpe_codes, dropout_rate=0.1):
+    with open(bpe_codes, encoding="latin-1") as codes:
+        bpe = BPE(codes)
+
+    segmented_data = []
+    with open(data_file, 'r', encoding="latin-1") as f:
+        for line in f:
+            tokens = line.strip().split()
+            # Apply BPE and randomly drop merges
+            segmented_line = bpe.process_line(" ".join(tokens))
+            if dropout_rate > 0:
+                segmented_tokens = segmented_line.split()
+                segmented_tokens = [
+                    token.replace("@@", "") if random.random() < dropout_rate else token
+                    for token in segmented_tokens
+                ]
+                segmented_line = " ".join(segmented_tokens)
+            segmented_data.append(segmented_line)
+    return segmented_data
 
 def main(args):
     """ Main training function. Trains the translation model over the course of several epochs, including dynamic
@@ -96,12 +117,17 @@ def main(args):
     # Track validation performance for early stopping
     bad_epochs = 0
     best_validate = float('inf')
+    bpe_codes_path = os.path.join(args.data, 'bpe.codes')  # Assuming bpe.codes file exists
 
     for epoch in range(last_epoch + 1, args.max_epoch):
-        train_loader = \
-            torch.utils.data.DataLoader(train_dataset, num_workers=1, collate_fn=train_dataset.collater,
-                                        batch_sampler=BatchSampler(train_dataset, args.max_tokens, args.batch_size, 1,
-                                                                   0, shuffle=False, seed=42))
+        # Apply BPE-dropout before each epoch
+        train_dataset.src_data = apply_bpe_dropout(os.path.join(args.data, 'train.{:s}'.format(args.source_lang)), bpe_codes_path)
+        train_dataset.tgt_data = apply_bpe_dropout(os.path.join(args.data, 'train.{:s}'.format(args.target_lang)), bpe_codes_path)
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, num_workers=1, collate_fn=train_dataset.collater,
+            batch_sampler=BatchSampler(train_dataset, args.max_tokens, args.batch_size, 1, 0, shuffle=False, seed=42))
+        
         model.train()
         stats = OrderedDict()
         stats['loss'] = 0
@@ -110,7 +136,6 @@ def main(args):
         stats['batch_size'] = 0
         stats['grad_norm'] = 0
         stats['clip'] = 0
-        # Display progress
         progress_bar = tqdm(train_loader, desc='| Epoch {:03d}'.format(epoch), leave=False, disable=False)
 
         # Iterate over the training set
@@ -122,21 +147,17 @@ def main(args):
             model.train()
 
             output, _ = model(sample['src_tokens'], sample['src_lengths'], sample['tgt_inputs'])
-            loss = \
-                criterion(output.view(-1, output.size(-1)), sample['tgt_tokens'].view(-1)) / len(sample['src_lengths'])
+            loss = criterion(output.view(-1, output.size(-1)), sample['tgt_tokens'].view(-1)) / len(sample['src_lengths'])
 
             if torch.isnan(loss).any():
                 logging.warning('Loss is NAN!')
                 print(src_dict.string(sample['src_tokens'].tolist()[0]), '---', tgt_dict.string(sample['tgt_tokens'].tolist()[0]))
-                # print()
-                # import pdb;pdb.set_trace()
 
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_norm)
             optimizer.step()
             optimizer.zero_grad()
 
-            # Update statistics for progress bar
             total_loss, num_tokens, batch_size = loss.item(), sample['num_tokens'], len(sample['src_tokens'])
 
             stats['loss'] += total_loss * len(sample['src_lengths']) / sample['num_tokens']
@@ -145,21 +166,16 @@ def main(args):
             stats['batch_size'] += batch_size
             stats['grad_norm'] += grad_norm
             stats['clip'] += 1 if grad_norm > args.clip_norm else 0
-            progress_bar.set_postfix({key: '{:.4g}'.format(value / (i + 1)) for key, value in stats.items()},
-                                     refresh=True)
+            progress_bar.set_postfix({key: '{:.4g}'.format(value / (i + 1)) for key, value in stats.items()}, refresh=True)
 
-        logging.info('Epoch {:03d}: {}'.format(epoch, ' | '.join(key + ' {:.4g}'.format(
-            value / len(progress_bar)) for key, value in stats.items())))
+        logging.info('Epoch {:03d}: {}'.format(epoch, ' | '.join(key + ' {:.4g}'.format(value / len(progress_bar)) for key, value in stats.items())))
 
-        # Calculate validation loss
         valid_perplexity = validate(args, model, criterion, valid_dataset, epoch)
         model.train()
 
-        # Save checkpoints
         if epoch % args.save_interval == 0:
-            utils.save_checkpoint(args, model, optimizer, epoch, valid_perplexity)  # lr_scheduler
+            utils.save_checkpoint(args, model, optimizer, epoch, valid_perplexity)
 
-        # Check whether to terminate training
         if valid_perplexity < best_validate:
             best_validate = valid_perplexity
             bad_epochs = 0
@@ -169,35 +185,29 @@ def main(args):
             logging.info('No validation set improvements observed for {:d} epochs. Early stop!'.format(args.patience))
             break
 
-
 def validate(args, model, criterion, valid_dataset, epoch):
-    """ Validates model performance on a held-out development set. """
-    valid_loader = \
-        torch.utils.data.DataLoader(valid_dataset, num_workers=1, collate_fn=valid_dataset.collater,
-                                    batch_sampler=BatchSampler(valid_dataset, args.max_tokens, args.batch_size, 1, 0,
-                                                               shuffle=False, seed=42))
+    valid_loader = torch.utils.data.DataLoader(
+        valid_dataset, num_workers=1, collate_fn=valid_dataset.collater,
+        batch_sampler=BatchSampler(valid_dataset, args.max_tokens, args.batch_size, 1, 0, shuffle=False, seed=42))
     model.eval()
     stats = OrderedDict()
     stats['valid_loss'] = 0
     stats['num_tokens'] = 0
     stats['batch_size'] = 0
 
-    # Iterate over the validation set
     for i, sample in enumerate(valid_loader):
         if args.cuda:
             sample = utils.move_to_cuda(sample)
         if len(sample) == 0:
             continue
         with torch.no_grad():
-            # Compute loss
             output, attn_scores = model(sample['src_tokens'], sample['src_lengths'], sample['tgt_inputs'])
             loss = criterion(output.view(-1, output.size(-1)), sample['tgt_tokens'].view(-1))
-        # Update tracked statistics
+
         stats['valid_loss'] += loss.item()
         stats['num_tokens'] += sample['num_tokens']
         stats['batch_size'] += len(sample['src_tokens'])
 
-    # Calculate validation perplexity
     stats['valid_loss'] = stats['valid_loss'] / stats['num_tokens']
     perplexity = np.exp(stats['valid_loss'])
     stats['num_tokens'] = stats['num_tokens'] / stats['batch_size']
@@ -208,16 +218,12 @@ def validate(args, model, criterion, valid_dataset, epoch):
 
     return perplexity
 
-
 if __name__ == '__main__':
     args = get_args()
     args.device_id = 0
 
-    # Set up logging to file
-    logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
-                        format='%(levelname)s: %(message)s')
+    logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO, format='%(levelname)s: %(message)s')
     if args.log_file is not None:
-        # Logging to console
         console = logging.StreamHandler()
         console.setLevel(logging.INFO)
         logging.getLogger('').addHandler(console)

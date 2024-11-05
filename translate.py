@@ -39,11 +39,16 @@ def main(args):
     utils.init_logging(args)
 
     # Load dictionaries
-    src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
-    logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
-    tgt_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.target_lang)))
-    logging.info('Loaded a target dictionary ({:s}) with {:d} words'.format(args.target_lang, len(tgt_dict)))
+    dict_paths = args.dicts.split(',')
 
+    src_dict_path = dict_paths[0]
+    tgt_dict_path = dict_paths[1]
+
+    src_dict = Dictionary.load(src_dict_path)
+    logging.info('Loaded a source dictionary (fr) with {:d} words'.format(len(src_dict)))
+    tgt_dict = Dictionary.load(tgt_dict_path)
+    logging.info('Loaded a target dictionary (en) with {:d} words'.format(len(tgt_dict)))
+    
     # Load dataset
     test_dataset = Seq2SeqDataset(
         src_file=os.path.join(args.data, 'test.{:s}'.format(args.source_lang)),

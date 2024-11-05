@@ -1,2 +1,6 @@
 assignments/01/baseline/
 __pycache__/
+checkpoints_asg4/checkpoint_best.pt
+checkpoints_asg4/checkpoint_last.pt
+data/en-fr/preprocessed/
+logs/
