@@ -3,6 +3,9 @@ import logging
 import argparse
 import numpy as np
 from tqdm import tqdm
+import time
+import matplotlib.pyplot as plt
+import sacrebleu
 
 import torch
 from torch.serialization import default_restore_location
@@ -20,9 +23,9 @@ def get_args():
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
     # Add data arguments
-    parser.add_argument('--data', default='assignments/03/prepared', help='path to data directory')
+    parser.add_argument('--data', default='data/en-fr/preprocessed', help='path to data directory')
     parser.add_argument('--dicts', required=True, help='path to directory containing source and target dictionaries')
-    parser.add_argument('--checkpoint-path', default='checkpoints_asg4/checkpoint_best.pt', help='path to the model file')
+    parser.add_argument('--checkpoint-path', default='assignments/03/baseline/checkpoints/checkpoint_best.pt', help='path to the model file')
     parser.add_argument('--batch-size', default=None, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', default='model_translations.txt', type=str,
                         help='path to the output file destination')
@@ -30,10 +33,56 @@ def get_args():
 
     # Add beam search arguments
     parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
-    # alpha hyperparameter for length normalization (described as lp in https://arxiv.org/pdf/1609.08144.pdf equation 14)
     parser.add_argument('--alpha', default=0.0, type=float, help='alpha for softer length normalization')
 
     return parser.parse_args()
+
+
+def compute_bleu(reference_file, hypothesis_file):
+    """Compute BLEU score and brevity penalty using SacreBLEU."""
+    # Ensure the files exist before proceeding
+    if not os.path.exists(reference_file):
+        raise FileNotFoundError(f"Reference file not found: {reference_file}")
+    if not os.path.exists(hypothesis_file):
+        raise FileNotFoundError(f"Hypothesis file not found: {hypothesis_file}")
+
+    with open(reference_file, 'r', encoding="utf-8", errors='ignore') as ref, open(hypothesis_file, 'r', encoding="utf-8", errors='ignore') as hyp:
+        references = [line.strip() for line in ref]
+        hypotheses = [line.strip() for line in hyp]
+    
+    if not references:
+        raise ValueError("The reference file is empty or contains no valid lines.")
+    if not hypotheses:
+        raise ValueError("The hypothesis file is empty or contains no valid lines.")
+    bleu = sacrebleu.corpus_bleu(hypotheses, [references])
+
+    return bleu.score, bleu.bp  # BLEU score and brevity penalty
+
+
+def plot_results(beam_sizes, bleu_scores, brevity_penalties, decoding_times):
+    """Visualize BLEU scores, brevity penalties, and decoding times."""
+    fig, ax1 = plt.subplots()
+
+    ax1.set_xlabel("Beam Size")
+    ax1.set_ylabel("BLEU Score", color="blue")
+    ax1.plot(beam_sizes, bleu_scores, label="BLEU Score", color="blue")
+    ax1.tick_params(axis="y", labelcolor="blue")
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Brevity Penalty", color="orange")
+    ax2.plot(beam_sizes, brevity_penalties, label="Brevity Penalty", color="orange")
+    ax2.tick_params(axis="y", labelcolor="orange")
+
+    plt.title("BLEU Score and Brevity Penalty vs Beam Size")
+    plt.show()
+
+    plt.figure()
+    plt.plot(beam_sizes, decoding_times, marker="o", label="Decoding Time")
+    plt.xlabel("Beam Size")
+    plt.ylabel("Decoding Time (seconds)")
+    plt.title("Decoding Time vs Beam Size")
+    plt.legend()
+    plt.show()
 
 
 def main(args):
@@ -225,6 +274,37 @@ def main(args):
                 out_file.write(all_hyps[sent_id] + '\n')
 
 
-if __name__ == '__main__':
+def experiment_with_beam_sizes():
+    """Run translation for multiple beam sizes and evaluate BLEU scores."""
+    beam_sizes = [1, 5, 10, 15, 20, 25]
+    bleu_scores = []
+    brevity_penalties = []
+    decoding_times = []
+
+    reference_file = "data/en-fr/prepared/test.fr"
     args = get_args()
-    main(args)
+
+    for beam_size in beam_sizes:
+        print(f"Running beam search with beam size {beam_size}")
+        args.beam_size = beam_size
+
+        args.output = f"model_translations_beam_{beam_size}.txt"
+        
+        start_time = time.time()
+
+        # Perform translation
+        main(args)
+
+        end_time = time.time()
+        decoding_times.append(end_time - start_time)
+
+        # Evaluate BLEU score and brevity penalty
+        bleu_score, brevity_penalty = compute_bleu(reference_file, args.output)
+        bleu_scores.append(bleu_score)
+        brevity_penalties.append(brevity_penalty)
+
+    plot_results(beam_sizes, bleu_scores, brevity_penalties, decoding_times)
+
+
+if __name__ == '__main__':
+    experiment_with_beam_sizes()
