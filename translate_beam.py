@@ -219,23 +219,23 @@ def main(args):
                     # __QUESTION 4: How are "add" and "add_final" different? 
                     # What would happen if we did not make this distinction?
 
-                    # Store the node as final if EOS is generated
+                    # If EOS is generated, mark the node as completed
                     if next_word[-1] == tgt_dict.eos_idx:
                         node = BeamSearchNode(
                             search, node.emb, node.lstm_out, node.final_hidden,
                             node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
                             next_word)), node.logp, node.length
-                            )
-                        search.add_final(-node.eval(args.alpha), node)
-
-                    # Add the node to current nodes for next iteration
+                        )
+                        node.completed = True  # Mark the node as completed
                     else:
                         node = BeamSearchNode(
                             search, node.emb, node.lstm_out, node.final_hidden,
                             node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
                             next_word)), node.logp + log_p, node.length + 1
-                            )
-                        search.add(-node.eval(args.alpha), node)
+                        )
+
+                    # Add the node to current nodes for next iteration
+                    search.add(-node.eval(args.alpha), node)
 
             # #import pdb;pdb.set_trace()
             # __QUESTION 5: What happens internally when we prune our beams?
@@ -276,7 +276,9 @@ def main(args):
 
 def experiment_with_beam_sizes():
     """Run translation for multiple beam sizes and evaluate BLEU scores."""
-    beam_sizes = [1, 5, 10, 15, 20, 25]
+    # beam_sizes = [1, 5, 10, 15, 20, 25]
+    beam_sizes = [3]
+    
     bleu_scores = []
     brevity_penalties = []
     decoding_times = []
@@ -289,7 +291,7 @@ def experiment_with_beam_sizes():
         args.beam_size = beam_size
 
         args.output = f"model_translations_beam_{beam_size}.txt"
-        
+
         start_time = time.time()
 
         # Perform translation
