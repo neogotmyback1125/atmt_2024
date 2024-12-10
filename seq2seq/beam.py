@@ -16,17 +16,23 @@ class BeamSearch(object):
         self.final = PriorityQueue() # beams that ended in EOS
 
         self._counter = count() # for correct ordering of nodes with same score
+        self.best_finished_score = -float('inf')  # Track the best score of finished hypotheses
 
     def add(self, score, node):
         """ Adds a new beam search node to the queue of current nodes """
-        self.nodes.put((score, next(self._counter), node))
+        if node.sequence[-1] == self.pad:  # Assuming PAD marks EOS
+            self.add_final(score, node)
+        else:
+            self.nodes.put((score, next(self._counter), node))
 
     def add_final(self, score, node):
         """ Adds a beam search path that ended in EOS (= finished sentence) """
-        # ensure all node paths have the same length for batch ops
+        # Ensure all node paths have the same length for batch operations
         missing = self.max_len - node.length
-        node.sequence = torch.cat((node.sequence.cpu(), torch.tensor([self.pad]*missing).long()))
+        node.sequence = torch.cat((node.sequence.cpu(), torch.tensor([self.pad] * missing).long()))
         self.final.put((score, next(self._counter), node))
+        # Update the best finished score
+        self.best_finished_score = max(self.best_finished_score, -score)
 
     def get_current_beams(self):
         """ Returns beam_size current nodes with the lowest negative log probability """
@@ -38,8 +44,7 @@ class BeamSearch(object):
 
     def get_best(self):
         """ Returns final node with the lowest negative log probability """
-        # Merge EOS paths and those that were stopped by
-        # max sequence length (still in nodes)
+        # Merge EOS paths and those that were stopped by max sequence length (still in nodes)
         merged = PriorityQueue()
         for _ in range(self.final.qsize()):
             node = self.final.get()
@@ -50,18 +55,22 @@ class BeamSearch(object):
             merged.put(node)
 
         node = merged.get()
-        node = (node[0], node[2])
-
-        return node
+        return node[0], node[2]
 
     def prune(self):
         """ Removes all nodes but the beam_size best ones (lowest neg log prob) """
         nodes = PriorityQueue()
-        # Keep track of how many search paths are already finished (EOS)
         finished = self.final.qsize()
-        for _ in range(self.beam_size-finished):
+
+        # Keep nodes within beam size and above the best finished score
+        for _ in range(self.beam_size - finished):
+            if self.nodes.empty():
+                break
             node = self.nodes.get()
-            nodes.put(node)
+            score = -node[0]
+            if score >= self.best_finished_score:
+                nodes.put(node)
+
         self.nodes = nodes
 
 
